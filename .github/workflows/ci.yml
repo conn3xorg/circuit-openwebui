@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Conn3x
+        env: &gh
+          GH_TOKEN: ${{ github.token }}
+        run: &install |
+          tag=$(gh release view -R conn3xorg/conn3x --json tagName -q .tagName)
+          file="conn3x_${tag#v}_linux_amd64.tar.gz"
+          cd "$RUNNER_TEMP"
+          curl -sSfLO "https://github.com/conn3xorg/conn3x/releases/download/$tag/$file"
+          curl -sSfLO "https://github.com/conn3xorg/conn3x/releases/download/$tag/checksums.txt"
+          grep " $file\$" checksums.txt | sha256sum -c -
+          mkdir -p bin && tar -xzf "$file" -C bin conn3x
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: conn3x version
+      - run: conn3x fmt -check -recursive
+      - name: Validate
+        run: conn3x init -backend=false && conn3x validate
+      - name: Validate the example
+        working-directory: examples/local
+        run: conn3x init -backend=false && conn3x validate
+
+  e2e:
+    needs: validate
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [rocky10, fedora45, ubuntu2404, debian13]
+    name: e2e (${{ matrix.distro }})
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The test host images live in the Conn3x repo.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: conn3xorg/conn3x
+          ref: main
+          path: conn3x
+          persist-credentials: false
+          sparse-checkout: test/images
+      - name: Install Conn3x
+        env: *gh
+        run: *install
+      # Open WebUI's image is about 1.6 GB compressed and several times that
+      # unpacked, inside the test host's own container storage. The runner's
+      # preinstalled Android, .NET and Haskell toolchains make room for it.
+      - name: Free disk space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+      - name: Start the ${{ matrix.distro }} host
+        working-directory: examples/local
+        env:
+          CONTAINERFILE: ${{ github.workspace }}/conn3x/test/images/${{ matrix.distro }}/Containerfile
+          # Podman in the host container needs a rootful, privileged container.
+          PODMAN: sudo podman
+        run: ./up.sh
+      - name: Apply, then plan again with no changes
+        working-directory: examples/local
+        run: |
+          conn3x init
+          conn3x apply -auto-approve
+          conn3x plan -detailed-exitcode
+      # Signs in as the admin the circuit created, checks that a stranger
+      # can't sign up, and lists a model from a stand-in OpenAI-compatible
+      # server. Then it restarts Open WebUI: the old session token has to
+      # still work, which needs WEBUI_SECRET_KEY unchanged, and the admin has
+      # to still sign in, which needs the database. Some test hosts have no
+      # curl, so it runs in the Open WebUI container, which shares the
+      # host's network.
+      - name: Check health, sign-in, sign-up, models, and a restart
+        run: |
+          sudo podman exec -i circuit-openwebui sh -eu <<'EOF'
+          c() { podman exec open-webui curl -sf "$@"; }
+          u=http://127.0.0.1:8080
+          json='Content-Type: application/json'
+          c $u/health | grep -q '"status":true'
+          # A stand-in OpenAI-compatible server on 9099 that lists one model.
+          podman exec -d open-webui python3 -c '
+          import http.server, json
+          class H(http.server.BaseHTTPRequestHandler):
+              def do_GET(self):
+                  body = json.dumps({"object": "list", "data": [{"id": "ci-fake-model", "object": "model", "owned_by": "ci"}]}).encode()
+                  self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(body)
+          http.server.HTTPServer(("127.0.0.1", 9099), H).serve_forever()
+          '
+          sleep 2
+          signin() { c -X POST -H "$json" -d '{"email":"admin@example.com","password":"correct-horse-battery"}' $u/api/v1/auths/signin | sed -n 's/.*"token":"\([^"]*\)".*/\1/p'; }
+          tok=$(signin)
+          [ -n "$tok" ]
+          auth="Authorization: Bearer $tok"
+          c -H "$auth" $u/api/v1/auths/ | grep -q '"role":"admin"'
+          code=$(podman exec open-webui curl -s -o /dev/null -w '%{http_code}' -X POST -H "$json" -d '{"name":"Mallory","email":"mallory@example.com","password":"correct-horse-battery-2"}' $u/api/v1/auths/signup)
+          [ "$code" = 403 ]
+          c -H "$auth" $u/api/models | grep -q '"id":"ci-fake-model"'
+          systemctl restart open-webui
+          for _ in $(seq 180); do c -o /dev/null $u/health && break; sleep 1; done
+          # The old token still works, so WEBUI_SECRET_KEY survived, and the admin
+          # can still sign in, so the database did.
+          c -H "$auth" $u/api/v1/auths/ | grep -q '"email":"admin@example.com"'
+          [ -n "$(signin)" ]
+          echo "All checks passed."
+          EOF
+      - name: Plan again after the restart
+        working-directory: examples/local
+        run: conn3x plan -detailed-exitcode
+      - name: Clean up
+        if: always()
+        working-directory: examples/local
+        env:
+          PODMAN: sudo podman
+        run: ./down.sh
