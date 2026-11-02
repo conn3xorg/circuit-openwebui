@@ -1,5 +1,7 @@
 # circuit-openwebui
 
+[![Conn3x grade](https://conn3x.org/circuits/openwebui/grade.svg)](https://conn3x.org/circuits/openwebui/grade)
+
 A Conn3x circuit that runs [Open WebUI](https://github.com/open-webui/open-webui), the self-hosted chat front end for local and hosted models, on your own hosts. Your people get a ChatGPT-style page in the browser; you decide who has an account, which models each of them can use, and where the conversations are kept.
 
 Open WebUI runs from its official image, `ghcr.io/open-webui/open-webui`, under Podman as a systemd service, pinned by tag and digest. Pair it with [circuit-ollama](https://github.com/conn3xorg/circuit-ollama) on the same host and nothing you type leaves the machine. Point it at an OpenAI-compatible API too, such as a [LiteLLM](https://github.com/BerriAI/litellm) gateway, and it can reach hosted models as well, through one address you control.
