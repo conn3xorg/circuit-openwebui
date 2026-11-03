@@ -77,6 +77,9 @@ jobs:
           conn3x init
           conn3x apply -auto-approve
           conn3x plan -detailed-exitcode
+          # The example's secrets reach the host write-only, so none of them
+          # may show up in state.
+          if grep -qF -e correct-horse-battery terraform.tfstate; then echo "A secret is in state." >&2; exit 1; fi
       # Signs in as the admin the circuit created, checks that a stranger
       # can't sign up, and lists a model from a stand-in OpenAI-compatible
       # server. Then it restarts Open WebUI: the old session token has to
