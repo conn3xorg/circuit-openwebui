@@ -27,7 +27,7 @@ module "ollama" {
 }
 
 module "openwebui" {
-  source = "github.com/conn3xorg/circuit-openwebui?ref=v0.1.0"
+  source = "github.com/conn3xorg/circuit-openwebui?ref=v0.1.1"
 
   depends_on = [module.ollama]
 
